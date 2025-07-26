@@ -1,4 +1,3 @@
-```json
 [
   {"id": 1, "sequencia": ["🔴", "🔴", "🔴"], "acao": "Entrar a favor"},
   {"id": 2, "sequencia": ["🔵", "🔴", "🔵"], "acao": "Entrar no oposto do último"},
@@ -51,4 +50,3 @@
   {"id": 49, "sequencia": ["🔵", "🔴", "🔴", "🔵", "🔵", "🔴", "🔴"], "acao": "Seguir padrão 2x"},
   {"id": 50, "sequencia": ["🔴", "🔴", "🟡", "🔵", "🔵", "🔴"], "acao": "Seguir 🔴"}
 ]
-```
