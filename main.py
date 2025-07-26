@@ -6,6 +6,7 @@ from telegram.ext import Application, CommandHandler
 from datetime import datetime, timezone
 import asyncio
 import logging
+import os
 
 # Configuração de logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Configurações
 API_URL = "https://api.casinoscores.com/svc-evolution-game-events/api/bacbo/latest"
-TELEGRAM_TOKEN = "7703975421:AAG-CG5Who2xs4NlevJqB5TNvjjzeUEDz8o"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "7703975421:AAG-CG5Who2xs4NlevJqB5TNvjjzeUEDz8o")
 CHAT_ID = "-1002859771274"
 CHECK_INTERVAL = 5
 ROUND_DURATION = 30
@@ -21,8 +22,15 @@ SIGNAL_DEADLINE = 7
 PATTERNS_FILE = "patterns.json"
 
 # Carregar padrões
-with open(PATTERNS_FILE, 'r') as f:
-    PATTERNS = json.load(f)
+try:
+    with open(PATTERNS_FILE, 'r') as f:
+        PATTERNS = json.load(f)
+except FileNotFoundError:
+    logger.error(f"Arquivo {PATTERNS_FILE} não encontrado.")
+    PATTERNS = []
+except json.JSONDecodeError as e:
+    logger.error(f"Erro ao decodificar {PATTERNS_FILE}: {e}")
+    PATTERNS = []
 
 # Estado do bot
 last_game_id = None
@@ -65,6 +73,9 @@ def map_outcome_to_emoji(outcome):
 
 def check_pattern(history):
     """Verifica se algum padrão foi detectado no histórico."""
+    if not PATTERNS:
+        logger.warning("Nenhum padrão carregado. Verifique o arquivo patterns.json.")
+        return None
     max_pattern_length = max(len(pattern['sequencia']) for pattern in PATTERNS)
     history_emojis = [map_outcome_to_emoji(game['data']['result']['outcome']) for game in history][-max_pattern_length:]
     for pattern in PATTERNS:
@@ -223,6 +234,9 @@ async def start(update, context):
 
 async def main():
     """Função principal do bot."""
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_TOKEN não configurado.")
+        return
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     
