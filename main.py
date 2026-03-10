@@ -15,41 +15,43 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "7905452331:AAGI8cYv9ReoFURjKO7I4iw6U1FdsIgqDdk")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "-1003870451338")
-API_URL = "https://api.signals-house.com/validate/results?tableId=27&lastResult=13382685"  # ← Alterado para Football Studio
+API_URL = "https://api.signals-house.com/validate/results?tableId=27&lastResult=13382685"
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Accept': 'application/json',
     'Accept-Language': 'en-US,en;q=0.9',
 }
+
 ANGOLA_TZ = pytz.timezone('Africa/Luanda')
 
-# Mapeamento específico para Football Studio
 OUTCOME_MAP = {
-    "Casa": "🔴",       # Home
-    "Visitante": "🔵",  # Away
-    "Tie": "🟡",        # Draw
+    "Casa": "🔴",
+    "Visitante": "🔵",
+    "Tie": "🟡",
     "Empate": "🟡",
 }
 
 GREEN_STICKER_ID = "CAACAgQAAxkBAAMCaanfUxV0k3upwRhvlpq9XyODGX4AAvAbAAL92lFROjONnjCocw86BA"
 
-API_POLL_INTERVAL = 1.2
-SIGNAL_COOLDOWN_DURATION = 2.5
+# ═══════════════════════════════════════════════
+# INTERVALOS OTIMIZADOS PARA MÁXIMA VELOCIDADE
+# ═══════════════════════════════════════════════
+API_POLL_INTERVAL = 0.4          # Era 1.2 → agora 0.4s entre polls
+SIGNAL_COOLDOWN_DURATION = 1.0   # Era 2.5 → agora 1.0s cooldown após sinal
 
-# Configurações da análise estatística (ajustadas para Football Studio)
 JANELA_PRINCIPAL = 36
 JANELA_EMPATE = 20
 JANELA_ENTROPIA = 12
-MIN_DESVIO_PORCENTAGEM = 4.8   # Um pouco menor que no Bac Bo, jogo mais equilibrado
+MIN_DESVIO_PORCENTAGEM = 4.8
 MIN_CONFANCA = 59.0
-MAX_TAXA_EMPATE_RECENTE = 14.0  # Draw é raro (~11%), se >14% recente → skip
-
-P_CASA = 44.5      # Aprox. Home win %
-P_VISITANTE = 44.5 # Aprox. Away win %
-P_TIE = 11.0       # Aprox. Draw %
+MAX_TAXA_EMPATE_RECENTE = 14.0
+P_CASA = 44.5
+P_VISITANTE = 44.5
+P_TIE = 11.0
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)-5s | %(message)s')
 logger = logging.getLogger("FootballStudioBot")
+
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
 state: Dict[str, Any] = {
@@ -63,7 +65,6 @@ state: Dict[str, Any] = {
     "last_result_round_id": None, "new_result_added": False,
 }
 
-# Funções de envio Telegram (igual ao original)
 async def send_to_channel(text: str, parse_mode="HTML") -> Optional[int]:
     try:
         msg = await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=text, parse_mode=parse_mode, disable_web_page_preview=True)
@@ -136,7 +137,7 @@ async def delete_analise_message():
 
 async def fetch_api(session: aiohttp.ClientSession) -> Optional[Dict]:
     try:
-        async with session.get(API_URL, headers=HEADERS, timeout=7) as resp:
+        async with session.get(API_URL, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=4)) as resp:
             if resp.status == 200:
                 return await resp.json()
             return None
@@ -171,13 +172,9 @@ async def update_history_from_api(session):
                     state["history"].pop(0)
                 logger.info(f"Resultado novo: {outcome} (id {round_id})")
                 state["new_result_added"] = True
-                state["signal_cooldown_until"] = datetime.now().timestamp() + 0.5
+                state["signal_cooldown_until"] = datetime.now().timestamp() + 0.1  # Era 0.5 → 0.1s
     except Exception as e:
         logger.debug(f"Erro processando API: {e}")
-
-# ────────────────────────────────────────────────
-# LÓGICA ESTATÍSTICA ADAPTADA PARA FOOTBALL STUDIO
-# ────────────────────────────────────────────────
 
 def calcular_entropia_binaria(p: float) -> float:
     if p <= 0 or p >= 1:
@@ -191,9 +188,9 @@ def proporcao_na_janela(hist: List[str], janela: int) -> tuple[float, float, flo
     recorte = hist[-janela_real:]
     c = Counter(recorte)
     n = len(recorte)
-    p_c = c["🔴"] / n * 100 if n > 0 else 0  # Casa
-    p_v = c["🔵"] / n * 100 if n > 0 else 0  # Visitante
-    p_t = c["🟡"] / n * 100 if n > 0 else 0  # Tie
+    p_c = c["🔴"] / n * 100 if n > 0 else 0
+    p_v = c["🔵"] / n * 100 if n > 0 else 0
+    p_t = c["🟡"] / n * 100 if n > 0 else 0
     return p_c, p_v, p_t
 
 def desvio_da_esperada(p_obs: float, p_esperada: float) -> float:
@@ -204,52 +201,40 @@ def gerar_sinal_inteligente(
 ) -> tuple[Optional[str], Optional[str], float]:
     if len(history) < 12:
         return None, None, 0.0
-
     p_c, p_v, p_t = proporcao_na_janela(history, JANELA_PRINCIPAL)
     p_c_short, p_v_short, p_t_short = proporcao_na_janela(history, JANELA_EMPATE)
-
     if p_t_short > MAX_TAXA_EMPATE_RECENTE:
         return "Muitos empates recentes", None, 0.0
-
     desv_c = desvio_da_esperada(p_c, P_CASA)
     desv_v = desvio_da_esperada(p_v, P_VISITANTE)
-
     ent = 1.0
     if len(history) >= JANELA_ENTROPIA:
         recorte = history[-JANELA_ENTROPIA:]
         c = Counter(x for x in recorte if x in ("🔴", "🔵"))
         n_bin = sum(c.values())
         if n_bin >= 6:
-            p_bin = c["🔴"] / n_bin   # Proporção Casa na binária
+            p_bin = c["🔴"] / n_bin
             ent = calcular_entropia_binaria(p_bin)
-
     score = 0.0
     cor_favor = None
-
     if desv_c > MIN_DESVIO_PORCENTAGEM and p_c > p_v + 2:
         score += (desv_c - MIN_DESVIO_PORCENTAGEM) * 1.8
-        cor_favor = "🔴"  # Casa
+        cor_favor = "🔴"
     elif desv_v > MIN_DESVIO_PORCENTAGEM and p_v > p_c + 2:
         score += (desv_v - MIN_DESVIO_PORCENTAGEM) * 1.8
-        cor_favor = "🔵"  # Visitante
-
+        cor_favor = "🔵"
     if ent < 0.78:
         score += (0.92 - ent) * 2.2
-
     if abs(p_c_short - p_v_short) < 3.5:
         score *= 0.55
-
     if score < 1.6 or cor_favor is None:
         return "Sem força estatística suficiente", None, 0.0
-
     confianca = min(78.0, 52.0 + score * 4.2)
     if confianca < MIN_CONFANCA:
         return "Confiança abaixo do mínimo", None, confianca
-
     nome = "Desequilíbrio estatístico"
     if ent < 0.75:
         nome += " + baixa entropia"
-
     return nome, cor_favor, round(confianca, 1)
 
 def gerar_sinal_estrategia(history: List[str]):
@@ -289,13 +274,11 @@ async def resolve_after_result():
         return
     if not state["history"]:
         return
-
     last_outcome = state["history"][-1]
     state["last_result_round_id"] = state["last_round_id"]
     target = state["last_signal_color"]
     acertou = last_outcome == target
     is_tie = last_outcome == "🟡"
-
     if acertou or is_tie:
         state["total_greens"] += 1
         state["greens_seguidos"] += 1
@@ -313,16 +296,13 @@ async def resolve_after_result():
         })
         await refresh_analise_message()
         return
-
     state["martingale_count"] += 1
-
     if state["martingale_count"] == 1:
         await send_gale_warning(1)
         return
     elif state["martingale_count"] == 2:
         await send_gale_warning(2)
         return
-
     if state["martingale_count"] >= 3:
         state["greens_seguidos"] = 0
         state["total_losses"] += 1
@@ -349,12 +329,10 @@ async def try_send_signal():
     if not state["new_result_added"]:
         return
     state["new_result_added"] = False
-
     nome, cor = gerar_sinal_estrategia(state["history"])
     if not cor:
         await refresh_analise_message()
         return
-
     await delete_analise_message()
     state["martingale_message_ids"] = []
     texto = main_entry_text(nome, cor)
@@ -368,11 +346,12 @@ async def try_send_signal():
         logger.info(f"Sinal enviado → {cor} ({nome})")
 
 async def api_worker():
-    async with aiohttp.ClientSession() as session:
+    connector = aiohttp.TCPConnector(limit=5, keepalive_timeout=30)
+    async with aiohttp.ClientSession(connector=connector) as session:
         while True:
             try:
                 await update_history_from_api(session)
-                await asyncio.sleep(0.3)
+                # Sem sleep entre fetch e resolve → reação imediata
                 await resolve_after_result()
                 await try_send_signal()
             except Exception as e:
