@@ -9,30 +9,44 @@ import aiohttp
 from telegram import Bot
 from telegram.error import TelegramError
 from dotenv import load_dotenv
+import math
 
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "7905452331:AAGI8cYv9ReoFURjKO7I4iw6U1FdsIgqDdk")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "-1003870451338")
-API_URL = "https://api.signals-house.com/validate/results?tableId=27&lastResult=13382685"
+API_URL = "https://api.signals-house.com/validate/results?tableId=27&lastResult=13382685"  # ← Alterado para Football Studio
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Accept': 'application/json',
     'Accept-Language': 'en-US,en;q=0.9',
 }
 ANGOLA_TZ = pytz.timezone('Africa/Luanda')
+
+# Mapeamento específico para Football Studio
 OUTCOME_MAP = {
-    "Casa": "🔵", "Visitante": "🔴", "Tie": "🟡",
-    "casa": "🔵", "visitante": "🔴", "tie": "🟡",
-    "Home": "🔵", "Away": "🔴", "Draw": "🟡",
-    "PlayerWon": "🔵", "BankerWon": "🔴",
-    "Player": "🔵", "Banker": "🔴",
-    "🔵": "🔵", "🔴": "🔴", "🟡": "🟡",
+    "Casa": "🔴",       # Home
+    "Visitante": "🔵",  # Away
+    "Tie": "🟡",        # Draw
+    "Empate": "🟡",
 }
 
-API_POLL_INTERVAL = 2.0
-SIGNAL_COOLDOWN_DURATION = 4
 GREEN_STICKER_ID = "CAACAgQAAxkBAAMCaanfUxV0k3upwRhvlpq9XyODGX4AAvAbAAL92lFROjONnjCocw86BA"
+
+API_POLL_INTERVAL = 1.2
+SIGNAL_COOLDOWN_DURATION = 2.5
+
+# Configurações da análise estatística (ajustadas para Football Studio)
+JANELA_PRINCIPAL = 36
+JANELA_EMPATE = 20
+JANELA_ENTROPIA = 12
+MIN_DESVIO_PORCENTAGEM = 4.8   # Um pouco menor que no Bac Bo, jogo mais equilibrado
+MIN_CONFANCA = 59.0
+MAX_TAXA_EMPATE_RECENTE = 14.0  # Draw é raro (~11%), se >14% recente → skip
+
+P_CASA = 44.5      # Aprox. Home win %
+P_VISITANTE = 44.5 # Aprox. Away win %
+P_TIE = 11.0       # Aprox. Draw %
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)-5s | %(message)s')
 logger = logging.getLogger("FootballStudioBot")
@@ -43,14 +57,13 @@ state: Dict[str, Any] = {
     "last_signal_color": None, "martingale_count": 0, "entrada_message_id": None,
     "martingale_message_ids": [], "greens_seguidos": 0, "total_greens": 0,
     "greens_sem_gale": 0, "greens_gale_1": 0, "greens_gale_2": 0,
-    "total_empates": 0, "total_losses": 0, "last_signal_pattern": None,
-    "last_signal_sequence": None, "last_signal_round_id": None,
+    "total_empates": 0, "total_losses": 0,
     "signal_cooldown_until": 0.0, "analise_message_id": None,
-    "last_reset_date": None, "last_analise_refresh": 0.0,
-    "last_result_round_id": None, "player_score_last": None,
-    "banker_score_last": None, "new_result_added": False,
+    "last_reset_date": None,
+    "last_result_round_id": None, "new_result_added": False,
 }
 
+# Funções de envio Telegram (igual ao original)
 async def send_to_channel(text: str, parse_mode="HTML") -> Optional[int]:
     try:
         msg = await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=text, parse_mode=parse_mode, disable_web_page_preview=True)
@@ -66,11 +79,6 @@ async def send_sticker_to_channel(sticker_id: str) -> Optional[int]:
     except Exception as e:
         logger.error(f"Erro ao enviar sticker: {e}")
         return None
-
-async def send_error_to_channel(error_msg: str):
-    timestamp = datetime.now(ANGOLA_TZ).strftime("%Y-%m-%d %H:%M:%S")
-    text = f"⚠️ <b>ERRO DETECTADO</b> ⚠️\n<code>{timestamp}</code>\n\n{error_msg}"
-    await send_to_channel(text)
 
 async def delete_messages(message_ids: List[int]):
     if not message_ids:
@@ -113,7 +121,7 @@ def format_placar() -> str:
     )
 
 def format_analise_text() -> str:
-    return "⚽ <b>ANALISANDO O JOGO...</b> ⚽\n<i>Buscando a melhor oportunidade!</i>"
+    return "⚽ <b>ANALISANDO FOOTBALL STUDIO...</b> ⚽\n<i>Aguarde sinal</i>"
 
 async def refresh_analise_message():
     await delete_analise_message()
@@ -150,153 +158,122 @@ async def update_history_from_api(session):
             outcome_raw = latest.get("result")
             if not outcome_raw:
                 return
-            score = latest.get("score")
             outcome = OUTCOME_MAP.get(outcome_raw)
             if not outcome:
                 s = str(outcome_raw or "").lower()
-           if any(x in s for x in ["casa", "home", "player"]): outcome = "🔵"
-elif any(x in s for x in ["visitante", "away", "banker"]): outcome = "🔴"
-elif any(x in s for x in ["tie", "empate", "draw"]): outcome = "🟡"
+                if "casa" in s: outcome = "🔴"
+                elif "visitante" in s: outcome = "🔵"
+                elif "tie" in s or "empate" in s: outcome = "🟡"
             if outcome and state["last_round_id"] != round_id:
                 state["last_round_id"] = round_id
                 state["history"].append(outcome)
-                state["player_score_last"] = None
-                state["banker_score_last"] = None
                 if len(state["history"]) > 200:
                     state["history"].pop(0)
-                logger.info(f"Resultado novo: {outcome} (round {round_id}, score={score})")
-                state["new_result_added"] = True
-                state["signal_cooldown_until"] = datetime.now().timestamp() + 0.5
-        elif isinstance(items, dict):
-            round_id = items.get("id")
-            if not round_id:
-                return
-            outcome_raw = (items.get("result") or {}).get("outcome") if isinstance(items.get("result"), dict) else items.get("result")
-            if not outcome_raw:
-                return
-            outcome = OUTCOME_MAP.get(outcome_raw)
-            if not outcome:
-                s = str(outcome_raw or "").lower()
-               if any(x in s for x in ["casa", "home", "player"]): outcome = "🔵"
-elif any(x in s for x in ["visitante", "away", "banker"]): outcome = "🔴"
-elif any(x in s for x in ["tie", "empate", "draw"]): outcome = "🟡"
-            if outcome and state["last_round_id"] != round_id:
-                state["last_round_id"] = round_id
-                state["history"].append(outcome)
-                state["player_score_last"] = None
-                state["banker_score_last"] = None
-                if len(state["history"]) > 200:
-                    state["history"].pop(0)
-                logger.info(f"Resultado novo: {outcome} (round {round_id})")
+                logger.info(f"Resultado novo: {outcome} (id {round_id})")
                 state["new_result_added"] = True
                 state["signal_cooldown_until"] = datetime.now().timestamp() + 0.5
     except Exception as e:
         logger.debug(f"Erro processando API: {e}")
 
-def oposto(cor: str) -> str:
-    return "🔵" if cor == "🔴" else "🔴"
+# ────────────────────────────────────────────────
+# LÓGICA ESTATÍSTICA ADAPTADA PARA FOOTBALL STUDIO
+# ────────────────────────────────────────────────
 
-# ========== ESTRATÉGIAS PARA FOOTBALL STUDIO ==========
+def calcular_entropia_binaria(p: float) -> float:
+    if p <= 0 or p >= 1:
+        return 0.0
+    return - (p * math.log2(p) + (1-p) * math.log2(1-p))
 
-def estrategia_tendencia_forte(hist: List[str]):
-    """Se uma cor apareceu 4+ vezes nos últimos 5, seguir a tendência."""
-    if len(hist) < 5:
-        return None
-    window = hist[-5:]
-    counts = Counter(c for c in window if c in ("🔵", "🔴"))
-    if not counts:
-        return None
-    cor_dominante, qtd = counts.most_common(1)[0]
-    if qtd >= 4:
-        return ("Tendência Forte", cor_dominante)
-    return None
+def proporcao_na_janela(hist: List[str], janela: int) -> tuple[float, float, float]:
+    if len(hist) < 3:
+        return 0.0, 0.0, 0.0
+    janela_real = min(janela, len(hist))
+    recorte = hist[-janela_real:]
+    c = Counter(recorte)
+    n = len(recorte)
+    p_c = c["🔴"] / n * 100 if n > 0 else 0  # Casa
+    p_v = c["🔵"] / n * 100 if n > 0 else 0  # Visitante
+    p_t = c["🟡"] / n * 100 if n > 0 else 0  # Tie
+    return p_c, p_v, p_t
 
-def estrategia_seguir_dupla(hist: List[str]):
-    """Após duas cores iguais seguidas, apostar que a terceira repete."""
-    if len(hist) < 2:
-        return None
-    if hist[-1] == hist[-2] and hist[-1] in ("🔵", "🔴"):
-        return ("Seguir Dupla", hist[-1])
-    return None
+def desvio_da_esperada(p_obs: float, p_esperada: float) -> float:
+    return abs(p_obs - p_esperada)
 
-def estrategia_quebra_alternancia(hist: List[str]):
-    """Detecta padrão ABAB e aposta na quebra (continuação do último)."""
-    if len(hist) < 4:
-        return None
-    last_four = hist[-4:]
-    if (last_four[0] != last_four[1] and
-        last_four[0] == last_four[2] and
-        last_four[1] == last_four[3] and
-        all(c in ("🔵", "🔴") for c in last_four)):
-        return ("Quebra de Alternância", last_four[-1])
-    return None
+def gerar_sinal_inteligente(
+    history: List[str]
+) -> tuple[Optional[str], Optional[str], float]:
+    if len(history) < 12:
+        return None, None, 0.0
 
-def estrategia_reversao_longa(hist: List[str]):
-    """Após 5+ repetições da mesma cor, apostar na reversão."""
-    if len(hist) < 5:
-        return None
-    streak = 1
-    for i in range(len(hist) - 2, -1, -1):
-        if hist[i] == hist[-1] and hist[i] in ("🔵", "🔴"):
-            streak += 1
-        else:
-            break
-    if streak >= 5:
-        return ("Reversão Após Streak", oposto(hist[-1]))
-    return None
+    p_c, p_v, p_t = proporcao_na_janela(history, JANELA_PRINCIPAL)
+    p_c_short, p_v_short, p_t_short = proporcao_na_janela(history, JANELA_EMPATE)
 
-def gerar_sinal_estrategia(history: List[str], player_score=None, banker_score=None):
-    if len(history) < 3 or state["waiting_for_result"]:
+    if p_t_short > MAX_TAXA_EMPATE_RECENTE:
+        return "Muitos empates recentes", None, 0.0
+
+    desv_c = desvio_da_esperada(p_c, P_CASA)
+    desv_v = desvio_da_esperada(p_v, P_VISITANTE)
+
+    ent = 1.0
+    if len(history) >= JANELA_ENTROPIA:
+        recorte = history[-JANELA_ENTROPIA:]
+        c = Counter(x for x in recorte if x in ("🔴", "🔵"))
+        n_bin = sum(c.values())
+        if n_bin >= 6:
+            p_bin = c["🔴"] / n_bin   # Proporção Casa na binária
+            ent = calcular_entropia_binaria(p_bin)
+
+    score = 0.0
+    cor_favor = None
+
+    if desv_c > MIN_DESVIO_PORCENTAGEM and p_c > p_v + 2:
+        score += (desv_c - MIN_DESVIO_PORCENTAGEM) * 1.8
+        cor_favor = "🔴"  # Casa
+    elif desv_v > MIN_DESVIO_PORCENTAGEM and p_v > p_c + 2:
+        score += (desv_v - MIN_DESVIO_PORCENTAGEM) * 1.8
+        cor_favor = "🔵"  # Visitante
+
+    if ent < 0.78:
+        score += (0.92 - ent) * 2.2
+
+    if abs(p_c_short - p_v_short) < 3.5:
+        score *= 0.55
+
+    if score < 1.6 or cor_favor is None:
+        return "Sem força estatística suficiente", None, 0.0
+
+    confianca = min(78.0, 52.0 + score * 4.2)
+    if confianca < MIN_CONFANCA:
+        return "Confiança abaixo do mínimo", None, confianca
+
+    nome = "Desequilíbrio estatístico"
+    if ent < 0.75:
+        nome += " + baixa entropia"
+
+    return nome, cor_favor, round(confianca, 1)
+
+def gerar_sinal_estrategia(history: List[str]):
+    nome, cor, confianca = gerar_sinal_inteligente(history)
+    if cor is None:
         return None, None
+    return f"{nome} ({confianca}%)", cor
 
-    # Prioridade 1: Tendência forte
-    res = estrategia_tendencia_forte(history)
-    if res:
-        return res
-
-    # Prioridade 2: Reversão após streak longo (5+)
-    res = estrategia_reversao_longa(history)
-    if res:
-        return res
-
-    # Sistema de votação para as restantes
-    votos = {"🔵": 0, "🔴": 0}
-    melhor_nome = ""
-
-    res_dupla = estrategia_seguir_dupla(history)
-    if res_dupla:
-        nome, cor = res_dupla
-        votos[cor] += 2.0
-        melhor_nome = nome
-
-    res_alt = estrategia_quebra_alternancia(history)
-    if res_alt:
-        nome, cor = res_alt
-        votos[cor] += 1.5
-        if not melhor_nome:
-            melhor_nome = nome
-
-    if votos["🔵"] > 0 or votos["🔴"] > 0:
-        if abs(votos["🔵"] - votos["🔴"]) >= 1.5:
-            cor_final = "🔵" if votos["🔵"] > votos["🔴"] else "🔴"
-            return (melhor_nome, cor_final)
-
-    return None, None
-
-# ========== FIM DAS ESTRATÉGIAS ==========
-
-def main_entry_text(color: str) -> str:
-    team_name = "CASA 🔵" if color == "🔵" else "VISITANTE🔴"
+def main_entry_text(nome: str, color: str) -> str:
+    if color == "🔴":
+        lado = "CASA 🔴"
+    else:
+        lado = "VISITANTE 🔵"
     return (
-        f"⚽ ENTRADA CONFIRMADA ⚽\n\n"
-        f"Apostar em: {team_name}\n\n"
-        f"Proteger no EMPATE 🟡"
+        f"⚽ ENTRADA NO FOOTBALL STUDIO ⚽\n"
+        f"APOSTA NO {lado}\n"
+        f"PROTEJA O TIE 🟡\n"
+        f"<i>{nome}</i>"
     )
 
 async def send_gale_warning(level: int):
     if level not in (1, 2):
         return
-    text = f"🔄 <b>GALE {level}</b> 🔄\nManter a aposta na mesma equipa!"
+    text = f"🔄 <b>GALE {level}</b> 🔄\nContinuar na mesma cor!"
     msg_id = await send_to_channel(text)
     if msg_id:
         state["martingale_message_ids"].append(msg_id)
@@ -311,8 +288,6 @@ async def resolve_after_result():
     if state["last_result_round_id"] == state["last_round_id"]:
         return
     if not state["history"]:
-        return
-    if state["last_signal_round_id"] >= state["last_round_id"] and state["martingale_count"] == 0:
         return
 
     last_outcome = state["history"][-1]
@@ -334,8 +309,6 @@ async def resolve_after_result():
         state.update({
             "waiting_for_result": False, "last_signal_color": None,
             "martingale_count": 0, "entrada_message_id": None,
-            "last_signal_pattern": None, "last_signal_sequence": None,
-            "last_signal_round_id": None,
             "signal_cooldown_until": datetime.now().timestamp() + SIGNAL_COOLDOWN_DURATION
         })
         await refresh_analise_message()
@@ -359,8 +332,6 @@ async def resolve_after_result():
         state.update({
             "waiting_for_result": False, "last_signal_color": None,
             "martingale_count": 0, "entrada_message_id": None,
-            "last_signal_pattern": None, "last_signal_sequence": None,
-            "last_signal_round_id": None,
             "signal_cooldown_until": datetime.now().timestamp() + SIGNAL_COOLDOWN_DURATION
         })
         reset_placar_if_needed()
@@ -373,36 +344,28 @@ async def try_send_signal():
         return
     if now < state["signal_cooldown_until"]:
         return
-    if len(state["history"]) < 3:
+    if len(state["history"]) < 12:
         return
     if not state["new_result_added"]:
         return
     state["new_result_added"] = False
-    padrao, cor = gerar_sinal_estrategia(
-        state["history"],
-        state.get("player_score_last"),
-        state.get("banker_score_last")
-    )
+
+    nome, cor = gerar_sinal_estrategia(state["history"])
     if not cor:
         await refresh_analise_message()
         return
-    seq = "".join(state["history"][-6:])
-    if state["last_signal_pattern"] == padrao and state["last_signal_sequence"] == seq:
-        await refresh_analise_message()
-        return
+
     await delete_analise_message()
     state["martingale_message_ids"] = []
-    msg_id = await send_to_channel(main_entry_text(cor))
+    texto = main_entry_text(nome, cor)
+    msg_id = await send_to_channel(texto)
     if msg_id:
         state["entrada_message_id"] = msg_id
         state["waiting_for_result"] = True
         state["last_signal_color"] = cor
         state["martingale_count"] = 0
-        state["last_signal_pattern"] = padrao
-        state["last_signal_sequence"] = seq
-        state["last_signal_round_id"] = state["last_round_id"]
         state["signal_cooldown_until"] = now + SIGNAL_COOLDOWN_DURATION
-        logger.info(f"Sinal enviado → {cor} ({padrao})")
+        logger.info(f"Sinal enviado → {cor} ({nome})")
 
 async def api_worker():
     async with aiohttp.ClientSession() as session:
@@ -417,8 +380,8 @@ async def api_worker():
             await asyncio.sleep(API_POLL_INTERVAL)
 
 async def main():
-    logger.info("Football Studio Bot iniciado...")
-    await send_to_channel("⚽ Bot online – Football Studio – Gale 2 ativo")
+    logger.info("Bot Football Studio iniciado...")
+    await send_to_channel("🤖 Bot online – Football Studio | Gale 2 + análise estatística")
     await api_worker()
 
 if __name__ == "__main__":
