@@ -249,7 +249,7 @@ def main_entry_text(nome: str, color: str) -> str:
     else:
         lado = "VISITANTE 🔵"
     return (
-        f"⚽ ENTRADA NO FOOTBALL STUDIO ⚽\n"
+        f"⚽ ENTRADA DO CLEVER⚽\n"
         f"APOSTA NO {lado}\n"
         f"PROTEJA O TIE 🟡\n"
         f"<i>{nome}</i>"
@@ -360,7 +360,7 @@ async def api_worker():
 
 async def main():
     logger.info("Bot Football Studio iniciado...")
-    await send_to_channel("🤖 Bot online – Football Studio | Gale 2 + análise estatística")
+    await send_to_channel("🤖CLEVER BOT INICIADO🤖")
     await api_worker()
 
 if __name__ == "__main__":
