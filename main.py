@@ -34,10 +34,11 @@ OUTCOME_MAP = {
 GREEN_STICKER_ID = "CAACAgQAAxkBAAMCaanfUxV0k3upwRhvlpq9XyODGX4AAvAbAAL92lFROjONnjCocw86BA"
 
 # ═══════════════════════════════════════════════
-# INTERVALOS OTIMIZADOS PARA MÁXIMA VELOCIDADE
+# INTERVALOS AJUSTADOS PARA ENVIAR SINAL MAIS CEDO
 # ═══════════════════════════════════════════════
-API_POLL_INTERVAL = 0.4          # Era 1.2 → agora 0.4s entre polls
-SIGNAL_COOLDOWN_DURATION = 1.0   # Era 2.5 → agora 1.0s cooldown após sinal
+API_POLL_INTERVAL = 0.5           # 0.4 → 0.5 para mais estabilidade
+SIGNAL_COOLDOWN_DURATION = 4.5    # Tempo mínimo entre sinais (evita spam)
+POST_RESULT_DELAY = 1.2           # Delay após detectar novo resultado (dá tempo da rodada "respirar")
 
 JANELA_PRINCIPAL = 36
 JANELA_EMPATE = 20
@@ -62,7 +63,8 @@ state: Dict[str, Any] = {
     "total_empates": 0, "total_losses": 0,
     "signal_cooldown_until": 0.0, "analise_message_id": None,
     "last_reset_date": None,
-    "last_result_round_id": None, "new_result_added": False,
+    "last_result_round_id": None,
+    "next_signal_possible_after": 0.0,     # Novo: controla quando pode mandar próximo sinal
 }
 
 async def send_to_channel(text: str, parse_mode="HTML") -> Optional[int]:
@@ -137,44 +139,61 @@ async def delete_analise_message():
 
 async def fetch_api(session: aiohttp.ClientSession) -> Optional[Dict]:
     try:
-        async with session.get(API_URL, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+        async with session.get(API_URL, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=5)) as resp:
             if resp.status == 200:
                 return await resp.json()
             return None
-    except:
+    except Exception as e:
+        logger.debug(f"Erro fetch API: {e}")
         return None
 
 async def update_history_from_api(session):
     reset_placar_if_needed()
     data = await fetch_api(session)
     if not data:
-        return
+        return False  # indica que não houve atualização
+
     try:
         items = data.get("data", [])
-        if isinstance(items, list) and len(items) > 0:
-            latest = items[0]
-            round_id = latest.get("id")
-            if not round_id:
-                return
-            outcome_raw = latest.get("result")
-            if not outcome_raw:
-                return
-            outcome = OUTCOME_MAP.get(outcome_raw)
-            if not outcome:
-                s = str(outcome_raw or "").lower()
-                if "casa" in s: outcome = "🔴"
-                elif "visitante" in s: outcome = "🔵"
-                elif "tie" in s or "empate" in s: outcome = "🟡"
-            if outcome and state["last_round_id"] != round_id:
-                state["last_round_id"] = round_id
-                state["history"].append(outcome)
-                if len(state["history"]) > 200:
-                    state["history"].pop(0)
-                logger.info(f"Resultado novo: {outcome} (id {round_id})")
-                state["new_result_added"] = True
-                state["signal_cooldown_until"] = datetime.now().timestamp() + 0.1  # Era 0.5 → 0.1s
+        if not isinstance(items, list) or len(items) == 0:
+            return False
+
+        latest = items[0]
+        round_id = latest.get("id")
+        if not round_id or round_id == state["last_round_id"]:
+            return False
+
+        outcome_raw = latest.get("result")
+        if not outcome_raw:
+            return False
+
+        outcome = OUTCOME_MAP.get(outcome_raw)
+        if not outcome:
+            s = str(outcome_raw or "").lower()
+            if "casa" in s: outcome = "🔴"
+            elif "visitante" in s: outcome = "🔵"
+            elif "tie" in s or "empate" in s: outcome = "🟡"
+
+        if outcome:
+            state["last_round_id"] = round_id
+            state["history"].append(outcome)
+            if len(state["history"]) > 200:
+                state["history"].pop(0)
+            logger.info(f"Novo resultado adicionado: {outcome} (id {round_id})")
+
+            # Delay para permitir que o sinal saia na próxima rodada
+            now = datetime.now().timestamp()
+            state["next_signal_possible_after"] = now + POST_RESULT_DELAY
+            return True  # Houve atualização real
+
+        return False
     except Exception as e:
         logger.debug(f"Erro processando API: {e}")
+        return False
+
+# ────────────────────────────────────────────────
+# Funções de análise (mantidas iguais)
+# ────────────────────────────────────────────────
 
 def calcular_entropia_binaria(p: float) -> float:
     if p <= 0 or p >= 1:
@@ -249,7 +268,7 @@ def main_entry_text(nome: str, color: str) -> str:
     else:
         lado = "VISITANTE 🔵"
     return (
-        f"⚽ ENTRADA DO CLEVER⚽\n"
+        f"⚽ ENTRADA DO CLEVER ⚽\n"
         f"APOSTA NO {lado}\n"
         f"PROTEJA O TIE 🟡\n"
         f"<i>{nome}</i>"
@@ -270,15 +289,20 @@ async def clear_gale_messages():
 async def resolve_after_result():
     if not state.get("waiting_for_result") or not state.get("last_signal_color"):
         return
-    if state["last_result_round_id"] == state["last_round_id"]:
-        return
     if not state["history"]:
         return
     last_outcome = state["history"][-1]
+    if state["last_result_round_id"] == state["last_round_id"]:
+        return
     state["last_result_round_id"] = state["last_round_id"]
+
     target = state["last_signal_color"]
     acertou = last_outcome == target
     is_tie = last_outcome == "🟡"
+
+    now = datetime.now().timestamp()
+    state["next_signal_possible_after"] = now + POST_RESULT_DELAY
+
     if acertou or is_tie:
         state["total_greens"] += 1
         state["greens_seguidos"] += 1
@@ -292,10 +316,10 @@ async def resolve_after_result():
         state.update({
             "waiting_for_result": False, "last_signal_color": None,
             "martingale_count": 0, "entrada_message_id": None,
-            "signal_cooldown_until": datetime.now().timestamp() + SIGNAL_COOLDOWN_DURATION
         })
         await refresh_analise_message()
         return
+
     state["martingale_count"] += 1
     if state["martingale_count"] == 1:
         await send_gale_warning(1)
@@ -303,6 +327,7 @@ async def resolve_after_result():
     elif state["martingale_count"] == 2:
         await send_gale_warning(2)
         return
+
     if state["martingale_count"] >= 3:
         state["greens_seguidos"] = 0
         state["total_losses"] += 1
@@ -312,27 +337,29 @@ async def resolve_after_result():
         state.update({
             "waiting_for_result": False, "last_signal_color": None,
             "martingale_count": 0, "entrada_message_id": None,
-            "signal_cooldown_until": datetime.now().timestamp() + SIGNAL_COOLDOWN_DURATION
         })
         reset_placar_if_needed()
         await refresh_analise_message()
 
 async def try_send_signal():
     now = datetime.now().timestamp()
+
     if state["waiting_for_result"]:
-        await delete_analise_message()
         return
+
     if now < state["signal_cooldown_until"]:
         return
+
+    if now < state["next_signal_possible_after"]:
+        return
+
     if len(state["history"]) < 12:
         return
-    if not state["new_result_added"]:
-        return
-    state["new_result_added"] = False
+
     nome, cor = gerar_sinal_estrategia(state["history"])
     if not cor:
-        await refresh_analise_message()
         return
+
     await delete_analise_message()
     state["martingale_message_ids"] = []
     texto = main_entry_text(nome, cor)
@@ -343,24 +370,24 @@ async def try_send_signal():
         state["last_signal_color"] = cor
         state["martingale_count"] = 0
         state["signal_cooldown_until"] = now + SIGNAL_COOLDOWN_DURATION
-        logger.info(f"Sinal enviado → {cor} ({nome})")
+        logger.info(f"Sinal enviado → {cor} ({nome}) - cooldown até {state['signal_cooldown_until']:.1f}")
 
 async def api_worker():
     connector = aiohttp.TCPConnector(limit=5, keepalive_timeout=30)
     async with aiohttp.ClientSession(connector=connector) as session:
         while True:
             try:
-                await update_history_from_api(session)
-                # Sem sleep entre fetch e resolve → reação imediata
-                await resolve_after_result()
-                await try_send_signal()
+                updated = await update_history_from_api(session)
+                await resolve_after_result()   # Resolve primeiro (fechar entradas pendentes)
+                await try_send_signal()        # Depois tenta novo sinal
             except Exception as e:
-                logger.debug(f"Erro loop principal: {e}")
+                logger.debug(f"Erro no loop principal: {e}")
             await asyncio.sleep(API_POLL_INTERVAL)
 
 async def main():
     logger.info("Bot Football Studio iniciado...")
-    await send_to_channel("🤖CLEVER BOT INICIADO🤖")
+    await send_to_channel("🤖 CLEVER BOT INICIADO 🤖")
+    await refresh_analise_message()
     await api_worker()
 
 if __name__ == "__main__":
